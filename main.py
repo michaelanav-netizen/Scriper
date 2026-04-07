@@ -1,8 +1,11 @@
 """
 Scriper — Roblox Ads Manager audience-estimate automation tool.
 
-Usage:
+Usage (terminal):
     python main.py
+
+Usage (GUI):
+    python gui.py
 
 Prerequisites:
     pip install -r requirements.txt
@@ -13,8 +16,10 @@ Prerequisites:
 import asyncio
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
+from typing import Callable, Optional
 
 from playwright.async_api import async_playwright, BrowserContext
 
@@ -45,13 +50,26 @@ async def _check_session_alive(page, context: BrowserContext) -> bool:
     return True
 
 
-async def run() -> None:
+async def run(
+    stop_event: Optional[threading.Event] = None,
+    on_done: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    """
+    Main scraping loop.
+
+    Args:
+        stop_event: When set, the loop exits gracefully after the current
+                    combination and saves progress (so it can be resumed).
+        on_done:    Optional callback called on completion with
+                    (rows_collected, errors) so the GUI can show a summary.
+    """
     # --- Validate credentials are set ---
     if not ROBLOX_USERNAME:
         log.error(
-            "ROBLOX_USERNAME is not set. Copy .env.example to .env and fill it in."
+            "ROBLOX_USERNAME is not set. "
+            "Fill in your username and password and click START again."
         )
-        sys.exit(1)
+        return
 
     # --- Load resume state ---
     done = load_progress()
@@ -60,15 +78,16 @@ async def run() -> None:
     remaining = len(combos)
 
     log.info(
-        f"Scriper starting up.\n"
-        f"  Total combinations : {grand_total}\n"
-        f"  Already done       : {grand_total - remaining}\n"
-        f"  Remaining          : {remaining}"
+        f"Scriper starting up.  "
+        f"Total: {grand_total}  |  Already done: {grand_total - remaining}  |  "
+        f"Remaining: {remaining}"
     )
 
     if remaining == 0:
         log.info("All combinations already collected. Nothing to do.")
-        log.info("Delete output/progress.json to start over.")
+        log.info("To start over, delete the file output/progress.json.")
+        if on_done:
+            on_done(0, 0)
         return
 
     # --- Ensure output directory exists ---
@@ -76,6 +95,7 @@ async def run() -> None:
     os.makedirs("session", exist_ok=True)
 
     errors = 0
+    collected = 0
     start_time = time.time()
 
     async with async_playwright() as pw:
@@ -96,12 +116,19 @@ async def run() -> None:
         await navigate_to_targeting_step(page)
 
         for i, combo in enumerate(combos, 1):
+            # --- Check stop signal ---
+            if stop_event and stop_event.is_set():
+                log.info("Stop requested. Saving progress and closing browser …")
+                break
+
             # --- Periodic long pause (rate limiting) ---
             if i > 1 and (i - 1) % LONG_PAUSE_EVERY == 0:
-                log.info(
-                    f"Pausing {LONG_PAUSE_SECONDS}s to reduce detection risk …"
-                )
-                await asyncio.sleep(LONG_PAUSE_SECONDS)
+                log.info(f"Pausing {LONG_PAUSE_SECONDS}s to reduce detection risk …")
+                # Sleep in small chunks so the stop event is checked during the pause.
+                for _ in range(LONG_PAUSE_SECONDS * 2):
+                    if stop_event and stop_event.is_set():
+                        break
+                    await asyncio.sleep(0.5)
 
             # --- Check session is still alive ---
             if not await _check_session_alive(page, context):
@@ -131,13 +158,13 @@ async def run() -> None:
                 key = (combo["country"], combo["gender"], combo["age"], combo["device"])
                 done.add(key)
                 save_progress(done)
+                collected += 1
 
                 log.info(f"{label} => {estimate}")
 
             except Exception as exc:
                 errors += 1
                 log.error(f"{label} => FAILED: {exc}")
-                # Record the error row so we know it was attempted.
                 append_csv_row({
                     "country": combo["country"],
                     "gender": combo["gender"],
@@ -158,9 +185,11 @@ async def run() -> None:
     seconds = int(elapsed % 60)
     log.info(
         f"Done in {minutes}m {seconds}s.  "
-        f"Errors: {errors}/{remaining}.  "
-        f"Results saved to output/results.csv and output/results.xlsx"
+        f"Rows collected: {collected}  |  Errors: {errors}"
     )
+
+    if on_done:
+        on_done(collected, errors)
 
 
 if __name__ == "__main__":
