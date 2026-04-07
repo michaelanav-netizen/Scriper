@@ -93,17 +93,27 @@ async def _do_fresh_login(page: Page) -> None:
     await page.fill("#login-password", ROBLOX_PASSWORD)
     await page.click("#login-button")
 
-    log.info("Credentials submitted, waiting for navigation …")
+    log.info(
+        "Credentials submitted. "
+        "If a CAPTCHA appears in the browser window, please solve it — "
+        "the tool will wait up to 3 minutes."
+    )
 
-    # Wait up to 15 s for either a successful redirect or a 2FA prompt.
+    # Wait up to 3 minutes so the user has time to solve any CAPTCHA.
     try:
         await page.wait_for_url(
             lambda url: "roblox.com/home" in url
             or "roblox.com/discover" in url
+            or "roblox.com/dashboard" in url
             or "two-step" in url
             or "2fa" in url.lower()
-            or "advertise.roblox.com" in url,
-            timeout=15_000,
+            or "advertise.roblox.com" in url
+            or (
+                url.startswith("https://www.roblox.com")
+                and "login" not in url
+                and "Login" not in url
+            ),
+            timeout=180_000,  # 3 minutes
         )
     except Exception:
         # Some redirects land on a generic page; continue and check.
@@ -137,10 +147,11 @@ async def _do_fresh_login(page: Page) -> None:
             pass
 
     # Confirm we reached a post-login page.
-    if "login" in page.url:
+    if "login" in page.url or "Login" in page.url:
         raise RuntimeError(
-            "Login failed — still on login page. "
-            "Check your ROBLOX_USERNAME / ROBLOX_PASSWORD in .env."
+            "Login failed — Roblox is still showing the login page.\n\n"
+            "This usually happens when the CAPTCHA took too long. "
+            "Please click START again — the browser will reopen and you can try once more."
         )
 
     log.info(f"Login successful. Current URL: {page.url}")
