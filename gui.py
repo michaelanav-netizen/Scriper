@@ -187,6 +187,11 @@ class ScriperApp:
         )
         self._open_btn.pack(side="left", padx=4)
 
+        self._diag_btn = ttk.Button(
+            btn_frame, text="📸  Diagnose", command=self._on_diagnose, width=14
+        )
+        self._diag_btn.pack(side="left", padx=4)
+
         ttk.Button(
             btn_frame, text="🗑  Start Over", command=self._start_over, width=14
         ).pack(side="right", padx=4)
@@ -332,6 +337,38 @@ class ScriperApp:
     # ------------------------------------------------------------------
     # Other button actions
     # ------------------------------------------------------------------
+
+    def _on_diagnose(self) -> None:
+        if self._running:
+            messagebox.showwarning("Running", "Stop the current run before diagnosing.")
+            return
+        self._diag_btn.config(state="disabled", text="Diagnosing …")
+        self._log_widget.config(state="normal")
+        self._log_widget.delete("1.0", "end")
+        self._log_widget.config(state="disabled")
+
+        from scriper.logger import add_gui_handler, remove_gui_handlers
+        remove_gui_handlers()
+        add_gui_handler(self._enqueue_log)
+
+        def _run():
+            try:
+                asyncio.run(_import_and_run_diagnostic())
+            except Exception as exc:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Diagnose Error",
+                    f"Diagnostic failed:\n\n{exc}\n\nPlease send a screenshot for support."
+                ))
+            finally:
+                self.root.after(0, lambda: self._diag_btn.config(
+                    state="normal", text="📸  Diagnose"
+                ))
+
+        async def _import_and_run_diagnostic():
+            from diagnose import run_diagnostic
+            await run_diagnostic()
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _open_results(self) -> None:
         output_dir = os.path.abspath("output")
