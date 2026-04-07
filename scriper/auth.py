@@ -18,6 +18,7 @@ from playwright.async_api import BrowserContext, Page
 from config import (
     ROBLOX_LOGIN_URL,
     ADS_MANAGER_URL,
+    MANAGE_ADS_URL,
     SESSION_FILE,
     SESSION_MAX_AGE_HOURS,
     ROBLOX_USERNAME,
@@ -44,30 +45,19 @@ def _session_is_fresh() -> bool:
 
 async def _is_logged_in(page: Page) -> bool:
     """
-    Navigates to Ads Manager and checks whether we land on a protected page
-    or get redirected to login.
+    Navigates to the Ads Manager manage page and checks whether we are
+    authenticated or get redirected to login.
     """
     try:
-        await page.goto(ADS_MANAGER_URL, timeout=PAGE_LOAD_TIMEOUT)
+        await page.goto(MANAGE_ADS_URL, timeout=PAGE_LOAD_TIMEOUT)
         await page.wait_for_load_state("domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        # If we were redirected to a login/auth page we are NOT logged in.
+        # If redirected to a login/auth page we are NOT logged in.
         if "login" in page.url or "signin" in page.url or "auth" in page.url:
             return False
-        # Ads Manager shows some kind of dashboard element when authenticated.
-        # Try a few generic indicators.
-        for selector in [
-            '[data-testid="ads-manager"]',
-            'nav',
-            '[class*="dashboard"]',
-            '[class*="campaign"]',
-        ]:
-            try:
-                await page.wait_for_selector(selector, timeout=3_000)
-                return True
-            except Exception:
-                pass
-        # Fallback: if the URL still starts with advertise.roblox.com we're in.
-        return "advertise.roblox.com" in page.url
+        # Ads Manager is on create.roblox.com/advertise — if still there, we're in.
+        if "create.roblox.com/advertise" in page.url:
+            return True
+        return False
     except Exception as exc:
         log.warning(f"Login check failed: {exc}")
         return False

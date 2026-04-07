@@ -54,7 +54,10 @@ DEVICES = ["ALL", "Mobile", "Tablet", "Desktop", "Console"]
 # URLs
 # ---------------------------------------------------------------------------
 ROBLOX_LOGIN_URL = "https://www.roblox.com/login"
-ADS_MANAGER_URL = "https://advertise.roblox.com"
+# Roblox Ads Manager moved to create.roblox.com/advertise
+ADS_MANAGER_URL     = "https://create.roblox.com/advertise"
+CREATE_CAMPAIGN_URL = "https://create.roblox.com/advertise/create"
+MANAGE_ADS_URL      = "https://create.roblox.com/advertise/manage"
 
 # ---------------------------------------------------------------------------
 # File paths
@@ -77,33 +80,40 @@ PAGE_LOAD_TIMEOUT = 30_000 # ms
 ELEMENT_TIMEOUT = 10_000   # ms – max wait for a single element
 
 # ---------------------------------------------------------------------------
-# Selectors
-# UPDATE THESE after inspecting the live Roblox Ads Manager DOM.
-# Ranked from most to least preferred; scraper tries each in order.
+# Selectors — derived from live DOM inspection of create.roblox.com/advertise
 # ---------------------------------------------------------------------------
 
+# --- "Advanced targeting" Edit button ---
+# In the Audience accordion, there is an "Advanced targeting (optional)" row
+# with an "Edit" button.  Clicking it opens the targeting drawer.
+ADVANCED_TARGETING_EDIT_SELECTORS = [
+    '[class*="advancedTargeting"] button',
+    'div:has(> span:has-text("Advanced targeting")) button:has-text("Edit")',
+    'button:has-text("Edit"):near(:has-text("Advanced targeting"))',
+]
+
 # --- Country ---
-# Roblox renders countries as a custom dropdown (not a native <select>).
-# Click COUNTRY_TRIGGER_SELECTOR to open it, then click the option by text.
+# These appear inside the advanced targeting drawer.
+# Will be updated once we see the drawer HTML.
 COUNTRY_TRIGGER_SELECTORS = [
     '[data-testid="country-dropdown"]',
     '[aria-label="Country"]',
     'label:has-text("Country") + div [role="combobox"]',
     'label:has-text("Country") ~ div button',
+    '[class*="country"] [role="combobox"]',
+    '[class*="country"] button',
 ]
 
 # --- Gender ---
-# Roblox shows gender as a toggle-button group or radio buttons.
 # The {value} placeholder is replaced with "All", "Male", or "Female".
 GENDER_SELECTORS = [
     '[data-testid="gender-{value}"]',
-    'button:has-text("{value}")',
     'label:has-text("{value}") input[type="radio"]',
     '[aria-label="{value}"]',
+    'button:has-text("{value}")',
 ]
 
 # --- Age ---
-# Age is a multi-select checkbox list.
 # {value} = "13-17", "18-24", "25+", or "All Ages"
 AGE_SELECTORS = [
     '[data-testid="age-{value}"]',
@@ -114,6 +124,7 @@ AGE_ALL_SELECTORS = [
     '[data-testid="age-all"]',
     'label:has-text("All Ages") input[type="checkbox"]',
     'button:has-text("All Ages")',
+    'label:has-text("All") input[type="checkbox"]',
 ]
 
 # --- Device ---
@@ -129,6 +140,7 @@ DEVICE_SELECTORS = [
 ESTIMATE_SELECTORS = [
     '[data-testid="audience-estimate"]',
     '[data-testid*="reach"]',
+    '[data-testid*="estimate"]',
     '[aria-label*="estimated"]',
     '[aria-label*="audience"]',
     '[class*="estimat"]',

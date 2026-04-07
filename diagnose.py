@@ -13,7 +13,7 @@ from typing import Callable
 
 from playwright.async_api import async_playwright
 
-from config import ADS_MANAGER_URL, PAGE_LOAD_TIMEOUT
+from config import ADS_MANAGER_URL, CREATE_CAMPAIGN_URL, PAGE_LOAD_TIMEOUT, ADVANCED_TARGETING_EDIT_SELECTORS
 from scriper.auth import ensure_authenticated
 from scriper.logger import get_logger
 
@@ -89,66 +89,41 @@ async def run_diagnostic() -> None:
         await save_page_info(page, "after_login")
         await screenshot("after_login", page)
 
-        # ── Step 2: navigate to Ads Manager ───────────────────────────
-        if "advertise.roblox.com" not in page.url:
-            log.info(f"Navigating to {ADS_MANAGER_URL} …")
-            await page.goto(ADS_MANAGER_URL, timeout=PAGE_LOAD_TIMEOUT)
+        # ── Step 2: navigate to Create Campaign page ──────────────────
+        if "create.roblox.com/advertise/create" not in page.url:
+            log.info(f"Navigating to {CREATE_CAMPAIGN_URL} …")
+            await page.goto(CREATE_CAMPAIGN_URL, timeout=PAGE_LOAD_TIMEOUT)
             await page.wait_for_load_state("domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
         await asyncio.sleep(3)
-        await save_page_info(page, "ads_manager_home")
-        await screenshot("ads_manager_home", page)
+        await save_page_info(page, "create_campaign_page")
+        await screenshot("create_campaign_page", page)
 
-        # ── Step 3: try clicking "Create Campaign" or similar ─────────
-        create_attempts = [
-            'button:has-text("Create")',
-            'a:has-text("Create")',
-            'button:has-text("New")',
-            'button:has-text("Campaign")',
-            '[data-testid*="create"]',
-            '[href*="create"]',
-        ]
-        clicked_create = False
-        for sel in create_attempts:
+        # ── Step 3: try clicking "Edit" for Advanced targeting ────────
+        log.info("Looking for the 'Advanced targeting' Edit button …")
+        clicked_edit = False
+        for sel in ADVANCED_TARGETING_EDIT_SELECTORS:
             try:
                 locator = page.locator(sel).first
-                await locator.wait_for(state="visible", timeout=2_000)
+                await locator.wait_for(state="visible", timeout=4_000)
                 text = await locator.text_content()
-                log.info(f"Found button: '{text}' — clicking …")
+                log.info(f"Found Edit button: '{text}' — clicking …")
                 await locator.click()
-                await asyncio.sleep(3)
-                await save_page_info(page, "after_create_click")
-                await screenshot("after_create_click", page)
-                clicked_create = True
+                await asyncio.sleep(2)
+                await save_page_info(page, "after_edit_click")
+                await screenshot("after_edit_click_targeting_drawer", page)
+                clicked_edit = True
                 break
             except Exception:
                 continue
 
-        if not clicked_create:
-            log.info("Could not find a 'Create' button — that is useful information too.")
-
-        # ── Step 4: try to reach something that looks like targeting ──
-        next_attempts = [
-            'button:has-text("Next")',
-            'button:has-text("Continue")',
-            'button:has-text("Audience")',
-            'button:has-text("Targeting")',
-            'a:has-text("Audience")',
-        ]
-        for sel in next_attempts:
-            try:
-                locator = page.locator(sel).first
-                await locator.wait_for(state="visible", timeout=2_000)
-                text = await locator.text_content()
-                log.info(f"Found next button: '{text}' — clicking …")
-                await locator.click()
-                await asyncio.sleep(3)
-                await save_page_info(page, "after_next_click")
-                await screenshot("after_next_click", page)
-                break
-            except Exception:
-                continue
+        if not clicked_edit:
+            log.info(
+                "Could not find the 'Edit' button for Advanced targeting. "
+                "The screenshot above shows what is currently visible."
+            )
 
         # ── Step 5: save full page HTML for selector analysis ─────────
+        log.info("Saving page HTML for selector analysis …")
         try:
             html = await page.content()
             html_path = os.path.join(DIAG_DIR, "diagnostic_page.html")

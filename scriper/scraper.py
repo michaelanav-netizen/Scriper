@@ -22,10 +22,12 @@ from playwright.async_api import Page, Response
 
 from config import (
     ADS_MANAGER_URL,
+    CREATE_CAMPAIGN_URL,
     MIN_DELAY,
     MAX_DELAY,
     PAGE_LOAD_TIMEOUT,
     ELEMENT_TIMEOUT,
+    ADVANCED_TARGETING_EDIT_SELECTORS,
     COUNTRY_TRIGGER_SELECTORS,
     GENDER_SELECTORS,
     AGE_SELECTORS,
@@ -123,79 +125,76 @@ async def _uncheck_all_ages(page: Page) -> None:
 
 async def navigate_to_targeting_step(page: Page) -> None:
     """
-    Ensure the browser is on the page / step that shows the audience targeting
-    controls and the estimated traffic figure.
+    Ensure the browser is on the ad-creation page with the Advanced Targeting
+    drawer open, so that country / gender / age / device controls are visible.
 
-    Roblox Ads Manager is a multi-step wizard.  This function attempts to land
-    on the correct step.  If a direct URL is known, set it in config.py and
-    replace this logic.
-
-    UPDATE THIS FUNCTION once you have inspected the live UI and know:
-      - The exact URL of the targeting step (or whether it's reached by clicking).
-      - Which "Next" / "Continue" buttons need to be clicked to get there.
+    Flow:
+      1. Navigate to CREATE_CAMPAIGN_URL (create.roblox.com/advertise/create)
+         if we are not already there.
+      2. Wait for the Audience section to appear.
+      3. Click the "Edit" button next to "Advanced targeting (optional)" to
+         open the targeting drawer.
     """
     current_url = page.url
 
-    # If we are already on the ads manager, try to find the targeting controls.
-    if "advertise.roblox.com" not in current_url:
-        log.info("Navigating to Ads Manager …")
-        await page.goto(ADS_MANAGER_URL, timeout=PAGE_LOAD_TIMEOUT)
+    # Go to the create-campaign page if we aren't already there.
+    if "create.roblox.com/advertise/create" not in current_url:
+        log.info(f"Navigating to {CREATE_CAMPAIGN_URL} …")
+        await page.goto(CREATE_CAMPAIGN_URL, timeout=PAGE_LOAD_TIMEOUT)
         await page.wait_for_load_state("domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
         await _delay()
 
-    # Attempt to reach the targeting step by clicking through the wizard.
-    # Common button labels used by Roblox — update if they differ.
-    wizard_step_buttons = [
-        'button:has-text("Create Campaign")',
-        'button:has-text("Create Ad")',
-        'a:has-text("Create Campaign")',
-        '[data-testid="create-campaign-button"]',
+    # Wait for the Audience accordion / section to be present.
+    audience_indicators = [
+        'text="Advanced targeting"',
+        ':has-text("Advanced targeting")',
+        ':has-text("Audience")',
     ]
-    for sel in wizard_step_buttons:
+    for sel in audience_indicators:
         try:
-            await page.locator(sel).first.click(timeout=4_000)
-            await page.wait_for_load_state("domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-            await _delay()
+            await page.wait_for_selector(sel, timeout=ELEMENT_TIMEOUT)
             break
         except Exception:
             pass
 
-    # Click through wizard steps until we spot a targeting control.
-    targeting_indicator_selectors = COUNTRY_TRIGGER_SELECTORS + [
-        '[data-testid="targeting-step"]',
+    # Click the "Edit" button to open the advanced targeting drawer.
+    opened = False
+    for sel in ADVANCED_TARGETING_EDIT_SELECTORS:
+        try:
+            locator = page.locator(sel).first
+            await locator.wait_for(state="visible", timeout=5_000)
+            await locator.click()
+            await _delay(short=True)
+            opened = True
+            log.info("Advanced targeting drawer opened.")
+            break
+        except Exception:
+            continue
+
+    if not opened:
+        log.warning(
+            "Could not open the Advanced targeting drawer. "
+            "The tool will still attempt to set targeting controls — "
+            "if selectors are wrong please run 📸 Diagnose and share the screenshot."
+        )
+
+    # Confirm targeting controls are now visible.
+    targeting_indicators = COUNTRY_TRIGGER_SELECTORS + [
         'label:has-text("Country")',
         'label:has-text("Gender")',
+        ':has-text("Country")',
     ]
-    max_next_clicks = 5
-    for _ in range(max_next_clicks):
-        for sel in targeting_indicator_selectors:
-            try:
-                await page.wait_for_selector(sel, timeout=2_000)
-                return  # Found targeting controls — we're on the right step.
-            except Exception:
-                pass
-        # Not there yet; try clicking "Next" / "Continue".
-        next_selectors = [
-            'button:has-text("Next")',
-            'button:has-text("Continue")',
-            'button:has-text("Targeting")',
-            '[data-testid="wizard-next"]',
-        ]
-        clicked = False
-        for sel in next_selectors:
-            try:
-                await page.locator(sel).first.click(timeout=3_000)
-                await _delay()
-                clicked = True
-                break
-            except Exception:
-                pass
-        if not clicked:
-            break  # No more navigation buttons found.
+    for sel in targeting_indicators:
+        try:
+            await page.wait_for_selector(sel, timeout=5_000)
+            log.info("Targeting controls confirmed visible.")
+            return
+        except Exception:
+            pass
 
     log.warning(
-        "Could not confirm targeting step. Proceeding anyway — "
-        "you may need to update navigate_to_targeting_step() in scraper.py."
+        "Targeting controls not confirmed. Proceeding anyway — "
+        "selectors may need updating after running 📸 Diagnose."
     )
 
 
