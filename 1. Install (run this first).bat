@@ -40,7 +40,7 @@ echo.
 REM ── Install Python packages ───────────────────────────────────────────────
 echo  Installing required packages (this may take a minute) ...
 echo.
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo.
     echo  ERROR: Something went wrong installing packages.
@@ -55,7 +55,7 @@ REM ── Install Chromium browser ──────────────�
 echo  Installing the browser engine (Chromium) ...
 echo  This downloads about 150 MB - please wait.
 echo.
-playwright install chromium
+python -m playwright install chromium
 if %errorlevel% neq 0 (
     echo.
     echo  ERROR: Browser installation failed.
