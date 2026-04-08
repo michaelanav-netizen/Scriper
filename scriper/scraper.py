@@ -4,16 +4,18 @@ Core Playwright automation for the Roblox Ads Manager Audience Targeting modal.
 For each targeting combination this module:
   1. Ensures the "Audience Targeting" modal is open on the Create Campaign page.
   2. Resets all targeting to defaults (Reset All).
-  3. Sets Location, Ages, Gender, Device via the tag-based multi-select dropdowns.
+  3. Sets Location, Ages, Gender, Device via the modal's dropdowns.
   4. Waits for the Audience Size Estimate to stabilise.
   5. Returns the estimate string (e.g. "1.1M - 1.4M").
 
 UI facts (confirmed from live screenshots):
-  - The modal is titled "Audience Targeting".
-  - Every field (Location, Ages, Gender, Device) uses a tag-based multi-select:
-      default state shows one tag ("All Regions", "All Ages", …).
-  - The estimate appears near the "Audience Size Estimate" label.
+  - Location(s): text search input + two-level nested tree (regions → countries).
+    Typing a country name filters the list; then click the matching checkbox.
+  - Ages / Gender(s) / Device(s): flat single-level dropdown opened by a ▼ button.
+    The current selection shows as a tag ("All Ages ×"); deselect it inside the
+    open dropdown before selecting a specific value.
   - A "Reset All" button at the bottom restores every field to its default.
+  - The Audience Size Estimate appears near the "Audience Size Estimate" label.
 """
 
 import asyncio
@@ -28,7 +30,6 @@ from config import (
     MIN_DELAY,
     MAX_DELAY,
     PAGE_LOAD_TIMEOUT,
-    ELEMENT_TIMEOUT,
     ADVANCED_TARGETING_EDIT_SELECTORS,
     AUDIENCE_MODAL_SELECTORS,
     RESET_ALL_SELECTORS,
@@ -53,95 +54,116 @@ async def _delay(short: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Low-level UI helpers for the tag-based multi-select dropdowns
+# Low-level UI helpers
 # ---------------------------------------------------------------------------
 
-async def _remove_all_tags(page: Page, field_label: str) -> None:
+async def _select_option(page: Page, value: str) -> bool:
     """
-    Remove every tag from the named multi-select field so it becomes empty.
+    Click the visible dropdown option that exactly or partially matches *value*.
+    Assumes the dropdown list is already open.
+    Returns True on success.
+    """
+    candidates = [
+        # Exact-match selectors first (avoids "25+" matching "25+ users" etc.)
+        f'[role="option"]:text-is("{value}")',
+        f':text-is("{value}")',
+        # Partial-match fallbacks
+        f'[role="option"]:has-text("{value}")',
+        f'[role="listbox"] >> text="{value}"',
+        f'li:has-text("{value}")',
+        f'[class*="option"]:has-text("{value}")',
+        f'[class*="menu"] :has-text("{value}")',
+    ]
+    for sel in candidates:
+        try:
+            locator = page.locator(sel).first
+            await locator.wait_for(state="visible", timeout=3_000)
+            await locator.click()
+            await asyncio.sleep(0.3)
+            return True
+        except Exception:
+            continue
 
-    Strategy:
-      1. Use JavaScript to find the field container by its label text and click
-         every button inside it (which removes all tags).
-      2. Short sleep so the DOM settles.
-    """
-    removed = await page.evaluate(
-        """(label) => {
-            // Walk all elements to find a small container that has the label text.
-            // Typical structure: div > label("Location(s)") + div > [tags...]
+    # JavaScript fallback — exact text match then partial
+    clicked = await page.evaluate(
+        """(value) => {
             const all = [...document.querySelectorAll('*')];
-            // Find a label-like element with this text
-            const labelEl = all.find(el =>
-                el.children.length === 0 &&
-                el.textContent.trim().startsWith(label)
+            // Only consider visible leaf-ish elements
+            const visible = all.filter(el =>
+                el.offsetParent !== null &&
+                el.children.length <= 2 &&
+                el.textContent.trim().length > 0
             );
-            if (!labelEl) return 0;
-            // Walk up to find a container that holds both the label and the tags
-            let container = labelEl.parentElement;
-            for (let i = 0; i < 4 && container; i++) {
-                const btns = [...container.querySelectorAll('button, [role="button"]')];
-                // Only click buttons that are tag-remove buttons (small, icon-like)
-                const removeBtns = btns.filter(b => {
-                    const txt = b.textContent.trim();
-                    return txt === '' || txt === '×' || txt === 'x' || b.getAttribute('aria-label') === 'Remove';
-                });
-                if (removeBtns.length > 0) {
-                    removeBtns.forEach(b => b.click());
-                    return removeBtns.length;
-                }
-                // Also try SVG buttons (icon-only remove buttons)
-                const svgBtns = btns.filter(b => b.querySelector('svg'));
-                if (svgBtns.length > 0) {
-                    svgBtns.forEach(b => b.click());
-                    return svgBtns.length;
-                }
-                container = container.parentElement;
-            }
-            return 0;
+            const exact = visible.find(el => el.textContent.trim() === value);
+            if (exact) { exact.click(); return true; }
+            const partial = visible.find(el => el.textContent.includes(value));
+            if (partial) { partial.click(); return true; }
+            return false;
         }""",
-        field_label,
+        value,
     )
-    if removed:
-        await asyncio.sleep(0.4)
-    else:
-        log.debug(f"_remove_all_tags: no remove buttons found for field '{field_label}'")
+    if clicked:
+        await asyncio.sleep(0.3)
+    return bool(clicked)
 
 
-async def _open_field(page: Page, field_label: str) -> bool:
+async def _deselect_option(page: Page, value: str) -> None:
     """
-    Click the dropdown trigger for the named field so that the options list appears.
-
-    Tries multiple CSS selector strategies in order.
-    Returns True if the field was successfully opened.
+    If *value* is currently selected/highlighted in an already-open dropdown,
+    click it to deselect it.  Silently no-ops if not found.
     """
-    # The field containers use a label text like "Location(s)", "Ages", "Gender(s)", "Device(s)"
-    # Try several variations of the label (with/without plural suffix)
-    label_variants = [field_label, field_label + "(s)", field_label.rstrip("s")]
+    candidates = [
+        f'[role="option"]:text-is("{value}")',
+        f':text-is("{value}")',
+        f'[role="option"]:has-text("{value}")',
+        f'li:has-text("{value}")',
+    ]
+    for sel in candidates:
+        try:
+            locator = page.locator(sel).first
+            await locator.wait_for(state="visible", timeout=1_500)
+            await locator.click()
+            await asyncio.sleep(0.2)
+            return
+        except Exception:
+            continue
+
+
+async def _open_flat_dropdown(page: Page, field_label: str) -> bool:
+    """
+    Open the ▼ dropdown for Ages / Gender(s) / Device(s).
+
+    These fields have a tag ("All Ages ×") plus a ▼ toggle button on the right.
+    We try to click the toggle button specifically, not the tag's × button.
+    Returns True if the dropdown appears to have opened.
+    """
+    label_variants = [field_label, field_label + "(s)"]
 
     for label in label_variants:
         candidates = [
-            # Combobox / input inside the field
-            f':has-text("{label}") >> [role="combobox"]',
-            f':has-text("{label}") >> input[type="text"]',
-            f':has-text("{label}") >> input',
-            # Dropdown arrow / indicator
+            # The ▼ arrow button — typically the LAST button in the field container
+            # We use :nth-match or button:last-child to pick the toggle not the ×
             f':has-text("{label}") >> button:last-child',
-            f':has-text("{label}") >> [class*="indicator"]',
+            f':has-text("{label}") >> [class*="toggle"]',
             f':has-text("{label}") >> [class*="arrow"]',
             f':has-text("{label}") >> [class*="chevron"]',
+            f':has-text("{label}") >> [class*="indicator"]:last-child',
+            f':has-text("{label}") >> [role="combobox"]',
+            # Click the field container itself as last resort
+            f':has-text("{label}") >> [class*="select"]',
             f':has-text("{label}") >> [class*="dropdown"]',
         ]
         for sel in candidates:
             try:
                 locator = page.locator(sel).first
-                await locator.wait_for(state="visible", timeout=3_000)
+                await locator.wait_for(state="visible", timeout=2_000)
                 await locator.click()
                 await asyncio.sleep(0.5)
                 return True
             except Exception:
                 continue
 
-    # JavaScript fallback: find the field container and click the last button in it
+    # JS fallback: find the label, walk up, click the LAST button (the ▼)
     opened = await page.evaluate(
         """(label) => {
             const all = [...document.querySelectorAll('*')];
@@ -151,9 +173,10 @@ async def _open_field(page: Page, field_label: str) -> bool:
             );
             if (!labelEl) return false;
             let container = labelEl.parentElement;
-            for (let i = 0; i < 4 && container; i++) {
-                const btns = [...container.querySelectorAll('button, input, [role="combobox"]')];
-                if (btns.length > 0) {
+            for (let i = 0; i < 5 && container; i++) {
+                const btns = [...container.querySelectorAll('button')];
+                if (btns.length >= 1) {
+                    // Click the LAST button — that's the ▼ toggle, not the × remove
                     btns[btns.length - 1].click();
                     return true;
                 }
@@ -168,72 +191,102 @@ async def _open_field(page: Page, field_label: str) -> bool:
     return bool(opened)
 
 
-async def _select_option(page: Page, value: str) -> bool:
+# ---------------------------------------------------------------------------
+# Location-specific helpers (text search + nested tree)
+# ---------------------------------------------------------------------------
+
+async def _clear_location_tags(page: Page) -> None:
     """
-    Click the dropdown option that matches *value*.
-    Assumes the dropdown list is already open.
-    Returns True on success.
+    Remove all currently-selected location tags from the Location(s) field.
+
+    The Location field tags are narrow pill elements with exactly one × button
+    inside them.  We only click buttons that are INSIDE tag pills, not the
+    standalone × "clear all" button or the region-list checkboxes.
+    """
+    removed = await page.evaluate(
+        """() => {
+            const all = [...document.querySelectorAll('*')];
+            // Find the Location label element
+            const labelEl = all.find(el =>
+                el.children.length === 0 &&
+                (el.textContent.trim() === 'Location(s)' ||
+                 el.textContent.trim() === 'Location')
+            );
+            if (!labelEl) return 0;
+
+            let container = labelEl.parentElement;
+            for (let i = 0; i < 5 && container; i++) {
+                // Tag pills: narrow elements with visible text + exactly one button
+                const tagPills = [...container.querySelectorAll('*')].filter(el => {
+                    if (el.matches('button, input, select, label, span')) return false;
+                    const btns = el.querySelectorAll('button');
+                    if (btns.length !== 1) return false;
+                    // Must have some text of its own (the country name)
+                    const textContent = [...el.childNodes]
+                        .filter(n => n.nodeType === 3)
+                        .map(n => n.textContent.trim())
+                        .join('');
+                    const hasOwnText = textContent.length > 0 || el.firstElementChild?.textContent?.trim()?.length > 0;
+                    // Narrow width = tag pill (not a full-width container)
+                    return hasOwnText && el.offsetWidth < 350 && el.offsetWidth > 10;
+                });
+
+                if (tagPills.length > 0) {
+                    tagPills.forEach(pill => {
+                        const btn = pill.querySelector('button');
+                        if (btn) btn.click();
+                    });
+                    return tagPills.length;
+                }
+                container = container.parentElement;
+            }
+            return 0;
+        }"""
+    )
+    if removed:
+        await asyncio.sleep(0.5)
+
+
+async def _focus_location_input(page: Page) -> bool:
+    """
+    Click the text input inside the Location(s) field to open the dropdown.
+    Returns True if the input was successfully focused.
     """
     candidates = [
-        f'[role="option"]:has-text("{value}")',
-        f'[role="listbox"] :has-text("{value}")',
-        f'[role="listbox"] >> text="{value}"',
-        f'li:has-text("{value}")',
-        f'[class*="option"]:has-text("{value}")',
-        f'[class*="menu"] :has-text("{value}")',
+        ':has-text("Location(s)") >> input',
+        ':has-text("Location") >> input[type="text"]',
+        ':has-text("Location") >> input',
+        'label:has-text("Location") ~ * input',
     ]
     for sel in candidates:
         try:
             locator = page.locator(sel).first
-            await locator.wait_for(state="visible", timeout=4_000)
+            await locator.wait_for(state="visible", timeout=3_000)
             await locator.click()
-            await asyncio.sleep(0.3)
             return True
         except Exception:
             continue
 
-    # JavaScript fallback
+    # JS fallback
     clicked = await page.evaluate(
-        """(value) => {
-            const opts = [...document.querySelectorAll('[role="option"], [class*="option"], li')];
-            const match = opts.find(el => el.textContent.trim() === value);
-            if (match) { match.click(); return true; }
-            // Partial match fallback
-            const partial = opts.find(el => el.textContent.includes(value));
-            if (partial) { partial.click(); return true; }
+        """() => {
+            const all = [...document.querySelectorAll('*')];
+            const lbl = all.find(el =>
+                el.children.length === 0 &&
+                (el.textContent.trim() === 'Location(s)' ||
+                 el.textContent.trim() === 'Location')
+            );
+            if (!lbl) return false;
+            let c = lbl.parentElement;
+            for (let i = 0; i < 6 && c; i++) {
+                const inp = c.querySelector('input');
+                if (inp) { inp.click(); inp.focus(); return true; }
+                c = c.parentElement;
+            }
             return false;
-        }""",
-        value,
+        }"""
     )
-    if clicked:
-        await asyncio.sleep(0.3)
     return bool(clicked)
-
-
-async def _ensure_all_default(page: Page, field_label: str) -> None:
-    """
-    After clearing all tags, verify the "All X" default tag is visible.
-    If not, open the dropdown and select the "All X" option explicitly.
-    """
-    default_tag = FIELD_ALL_DEFAULTS.get(field_label, "All")
-    # Give the UI a moment to restore the default
-    await asyncio.sleep(0.4)
-
-    # Check if the default tag is already visible
-    try:
-        await page.wait_for_selector(
-            f':has-text("{default_tag}")', timeout=1_500
-        )
-        return  # Default tag appeared automatically
-    except Exception:
-        pass
-
-    # Default didn't auto-appear — open the dropdown and select it
-    opened = await _open_field(page, field_label)
-    if opened:
-        selected = await _select_option(page, default_tag)
-        if not selected:
-            log.debug(f"Could not re-select '{default_tag}' for field '{field_label}'")
 
 
 # ---------------------------------------------------------------------------
@@ -242,14 +295,7 @@ async def _ensure_all_default(page: Page, field_label: str) -> None:
 
 async def navigate_to_targeting_step(page: Page) -> None:
     """
-    Ensure the browser is on the Create Campaign page with the
-    "Audience Targeting" modal open.
-
-    Flow:
-      1. Navigate to CREATE_CAMPAIGN_URL if not already there.
-      2. Scroll down so all lazy sections are visible.
-      3. Click the "Edit" button next to "Advanced targeting (optional)".
-      4. Wait for the "Audience Targeting" modal to appear.
+    Navigate to CREATE_CAMPAIGN_URL and open the Audience Targeting modal.
     """
     if "create.roblox.com/advertise/create" not in page.url:
         log.info(f"Navigating to {CREATE_CAMPAIGN_URL} …")
@@ -257,7 +303,7 @@ async def navigate_to_targeting_step(page: Page) -> None:
         await page.wait_for_load_state("domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
         await _delay()
 
-    # Scroll to the bottom of the page so lazy-loaded sections appear.
+    # Scroll to bottom so lazy-loaded sections appear.
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     await asyncio.sleep(1.5)
 
@@ -280,7 +326,6 @@ async def navigate_to_targeting_step(page: Page) -> None:
             "Run 📸 Diagnose to capture the modal selector."
         )
 
-    # Confirm modal is visible.
     for sel in AUDIENCE_MODAL_SELECTORS:
         try:
             await page.wait_for_selector(sel, timeout=8_000)
@@ -296,10 +341,7 @@ async def navigate_to_targeting_step(page: Page) -> None:
 
 
 async def _ensure_modal_open(page: Page) -> bool:
-    """
-    Return True if the Audience Targeting modal is currently visible.
-    If not, try to re-open it by clicking the Edit button.
-    """
+    """Return True if the modal is visible; try to re-open if not."""
     for sel in AUDIENCE_MODAL_SELECTORS:
         try:
             await page.wait_for_selector(sel, timeout=1_500)
@@ -307,7 +349,6 @@ async def _ensure_modal_open(page: Page) -> bool:
         except Exception:
             continue
 
-    # Modal is not open — try to re-open
     log.info("Modal not detected — re-opening …")
     for sel in ADVANCED_TARGETING_EDIT_SELECTORS:
         try:
@@ -335,7 +376,6 @@ async def _reset_all(page: Page) -> None:
         try:
             locator = page.locator(sel).first
             await locator.wait_for(state="visible", timeout=3_000)
-            # Only click if not disabled
             disabled = await locator.get_attribute("disabled")
             if disabled is None:
                 await locator.click()
@@ -346,101 +386,192 @@ async def _reset_all(page: Page) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-control setters (tag-based multi-select UI)
+# Per-control setters
 # ---------------------------------------------------------------------------
 
 async def set_country(page: Page, country: str) -> bool:
     """
-    Set the Location(s) field.
-    Returns True if the value was successfully selected, False otherwise.
-    A False return (country not in Roblox's UI) causes the caller to skip
-    this combination rather than record a wrong estimate.
+    Set the Location(s) field using the type-to-search approach.
+
+    The Location dropdown shows a two-level tree (regions → countries).
+    Typing a country name in the search input filters the list to show only
+    the matching country, then we click its checkbox.
+
+    Returns True if successful, False if the country was not found.
     """
     try:
-        await _remove_all_tags(page, "Location")
+        # Clear any existing location selection (remove tags).
+        await _clear_location_tags(page)
+
         if country == "ALL":
-            await _ensure_all_default(page, "Location")
+            # Empty Location = All Regions (no filter). Done.
             return True
-        opened = await _open_field(page, "Location")
-        if not opened:
-            log.warning(f"Could not open Location dropdown for '{country}' — skipping.")
+
+        # Click the Location input to open the dropdown.
+        focused = await _focus_location_input(page)
+        if not focused:
+            log.warning(f"Could not focus Location input for '{country}' — skipping.")
             return False
-        selected = await _select_option(page, country)
+
+        await asyncio.sleep(0.5)
+
+        # Type the country name — this filters the nested region tree.
+        await page.keyboard.type(country, delay=40)
+        await asyncio.sleep(0.8)  # Wait for the filter to apply.
+
+        # Click the matching item.  After typing, the nested region expands
+        # automatically and the country appears as a checkbox row.
+        option_candidates = [
+            f':text-is("{country}")',
+            f'[role="option"]:text-is("{country}")',
+            f'input[type="checkbox"] ~ :text-is("{country}")',
+            f'label:text-is("{country}")',
+            f'li:text-is("{country}")',
+            f':has-text("{country}")',
+        ]
+        selected = False
+        for sel in option_candidates:
+            try:
+                locator = page.locator(sel).first
+                await locator.wait_for(state="visible", timeout=3_000)
+                await locator.click()
+                selected = True
+                break
+            except Exception:
+                continue
+
         if not selected:
-            log.warning(f"'{country}' not found in Roblox's Location list — skipping.")
+            # JS fallback — find visible element with exact text.
+            selected = await page.evaluate(
+                """(country) => {
+                    const visible = [...document.querySelectorAll('*')].filter(el =>
+                        el.offsetParent !== null &&
+                        el.children.length <= 3 &&
+                        el.textContent.trim() === country
+                    );
+                    if (visible.length > 0) { visible[0].click(); return true; }
+                    return false;
+                }""",
+                country,
+            )
+
+        if not selected:
+            log.warning(f"'{country}' not found in Location dropdown after typing — skipping.")
+            await page.keyboard.press("Escape")
             return False
-        await _delay(short=True)
+
+        await asyncio.sleep(0.3)
+        # Close the location dropdown.
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
         return True
+
     except Exception as exc:
         log.warning(f"set_country('{country}') error: {exc} — skipping.")
         return False
 
 
 async def set_gender(page: Page, gender: str) -> bool:
-    """Set the Gender(s) field. Returns True on success."""
+    """
+    Set the Gender(s) field.
+
+    Opens the flat dropdown, deselects "All Genders" if needed,
+    then clicks the desired gender option.
+    """
     try:
-        await _remove_all_tags(page, "Gender")
         if gender == "ALL":
-            await _ensure_all_default(page, "Gender")
+            # Already at default after Reset All — nothing to do.
             return True
-        opened = await _open_field(page, "Gender")
+
+        opened = await _open_flat_dropdown(page, "Gender")
         if not opened:
             log.warning(f"Could not open Gender dropdown for '{gender}'.")
             return False
+        await asyncio.sleep(0.3)
+
+        # Deselect "All Genders" so the specific gender can be selected.
+        await _deselect_option(page, FIELD_ALL_DEFAULTS["Gender"])
+
         selected = await _select_option(page, gender)
         if not selected:
-            log.warning(f"'{gender}' not found in Roblox's Gender list.")
-            return False
-        await _delay(short=True)
-        return True
+            log.warning(f"'{gender}' not found in Gender dropdown.")
+        await page.keyboard.press("Escape")
+        return selected
+
     except Exception as exc:
         log.warning(f"set_gender('{gender}') error: {exc}")
         return False
 
 
 async def set_age(page: Page, age_tuple: tuple) -> bool:
-    """Set the Ages field. Returns True on success."""
+    """
+    Set the Ages field.
+
+    Opens the flat dropdown, deselects "All Ages", then clicks each
+    desired age option.  The dropdown is re-opened between selections
+    because clicking an option may close it.
+    """
     try:
-        await _remove_all_tags(page, "Ages")
         if age_tuple == ("ALL",):
-            await _ensure_all_default(page, "Ages")
+            # Already at default after Reset All — nothing to do.
             return True
-        all_selected = True
-        for age in age_tuple:
-            opened = await _open_field(page, "Ages")
-            if not opened:
-                log.warning(f"Could not open Ages dropdown for '{age}'.")
-                all_selected = False
-                continue
+
+        opened = await _open_flat_dropdown(page, "Ages")
+        if not opened:
+            log.warning("Could not open Ages dropdown.")
+            return False
+        await asyncio.sleep(0.3)
+
+        # Deselect "All Ages".
+        await _deselect_option(page, FIELD_ALL_DEFAULTS["Ages"])
+
+        all_ok = True
+        for i, age in enumerate(age_tuple):
+            if i > 0:
+                # Re-open the dropdown for each subsequent age.
+                await _open_flat_dropdown(page, "Ages")
+                await asyncio.sleep(0.3)
             selected = await _select_option(page, age)
             if not selected:
-                log.warning(f"'{age}' not found in Roblox's Ages list.")
-                all_selected = False
-            await asyncio.sleep(0.3)
-        await _delay(short=True)
-        return all_selected
+                log.warning(f"'{age}' not found in Ages dropdown.")
+                all_ok = False
+            await asyncio.sleep(0.2)
+
+        await page.keyboard.press("Escape")
+        return all_ok
+
     except Exception as exc:
         log.warning(f"set_age({age_tuple}) error: {exc}")
         return False
 
 
 async def set_device(page: Page, device: str) -> bool:
-    """Set the Device(s) field. Returns True on success."""
+    """
+    Set the Device(s) field.
+
+    Opens the flat dropdown, deselects "All Devices", then clicks
+    the desired device option.
+    """
     try:
-        await _remove_all_tags(page, "Device")
         if device == "ALL":
-            await _ensure_all_default(page, "Device")
+            # Already at default after Reset All — nothing to do.
             return True
-        opened = await _open_field(page, "Device")
+
+        opened = await _open_flat_dropdown(page, "Device")
         if not opened:
             log.warning(f"Could not open Device dropdown for '{device}'.")
             return False
+        await asyncio.sleep(0.3)
+
+        # Deselect "All Devices".
+        await _deselect_option(page, FIELD_ALL_DEFAULTS["Device"])
+
         selected = await _select_option(page, device)
         if not selected:
-            log.warning(f"'{device}' not found in Roblox's Device list.")
-            return False
-        await _delay(short=True)
-        return True
+            log.warning(f"'{device}' not found in Device dropdown.")
+        await page.keyboard.press("Escape")
+        return selected
+
     except Exception as exc:
         log.warning(f"set_device('{device}') error: {exc}")
         return False
@@ -467,7 +598,7 @@ async def _read_estimate_from_dom(page: Page) -> Optional[str]:
         except Exception:
             continue
 
-    # Full body scan — works as long as the modal is open (estimate text is in the DOM)
+    # Full body scan — works as long as the modal is open.
     try:
         body_text = await page.evaluate("() => document.body.innerText")
         m = _ESTIMATE_RE.search(body_text)
@@ -480,10 +611,7 @@ async def _read_estimate_from_dom(page: Page) -> Optional[str]:
 
 
 async def _wait_for_estimate_change(page: Page, previous: str, timeout: float = 5.0) -> None:
-    """
-    Poll until the estimate shown on the page differs from *previous*.
-    Gives up after *timeout* seconds and returns whatever is there.
-    """
+    """Poll until the estimate changes from *previous*, or until timeout."""
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         current = await _read_estimate_from_dom(page)
@@ -498,20 +626,13 @@ async def _wait_for_estimate_change(page: Page, previous: str, timeout: float = 
 
 async def scrape_combination(page: Page, combo: dict) -> str:
     """
-    Applies one targeting combination to the Audience Targeting modal and
-    returns the Audience Size Estimate string.
+    Apply one targeting combination to the Audience Targeting modal and
+    return the Audience Size Estimate string (e.g. "2.5M - 3M") or "N/A".
 
     combo keys: country, gender, age, age_tuple, device
-
-    Returns the estimate string (e.g. "1.1M - 1.4M") or "N/A" if not found.
-
-    Strategy:
-      - Intercept the Roblox audience API response (primary).
-      - Read DOM estimate text as fallback.
     """
     api_estimate: Optional[str] = None
 
-    # --- Network interception (primary strategy) ---
     async def _handle_response(response: Response) -> None:
         nonlocal api_estimate
         url = response.url.lower()
@@ -536,35 +657,29 @@ async def scrape_combination(page: Page, combo: dict) -> str:
     page.on("response", _handle_response)
 
     try:
-        # Ensure the modal is open before interacting.
         if not await _ensure_modal_open(page):
-            log.warning("Could not open Audience Targeting modal — skipping combination.")
+            log.warning("Could not open Audience Targeting modal — skipping.")
             return "N/A"
 
-        # Read current estimate before changing anything (to detect when it updates).
         previous_estimate = await _read_estimate_from_dom(page) or ""
 
-        # Click Reset All to start from a clean default state.
+        # Reset to defaults before applying new combination.
         await _reset_all(page)
 
-        # Apply targeting settings.
-        # If the country is not available in the Roblox UI, skip this combination
-        # by returning "N/A" — this does NOT raise an exception, so the combination
-        # is recorded as done and the loop moves on to the next one.
+        # Location — type-to-search.  Skip the whole combo if the country
+        # was not found (returns "N/A" so it is saved to done, not retried).
         country_ok = await set_country(page, combo["country"])
         if not country_ok and combo["country"] != "ALL":
-            log.info(
-                f"Skipping combination — '{combo['country']}' not available in Roblox UI."
-            )
+            log.info(f"Skipping — '{combo['country']}' not in Roblox Location list.")
             return "N/A"
 
+        # Flat dropdowns — deselect default then select specific value.
         await set_gender(page, combo["gender"])
         await set_age(page, combo["age_tuple"])
         await set_device(page, combo["device"])
 
-        # Wait for the estimate to update (up to 5 seconds).
+        # Wait for the estimate to update.
         await _wait_for_estimate_change(page, previous_estimate, timeout=5.0)
-        # Extra short sleep to let the number settle.
         await asyncio.sleep(1.0)
 
     finally:
