@@ -113,7 +113,13 @@ async def run(
         )
 
         page = await ensure_authenticated(context)
-        await navigate_to_targeting_step(page)
+        try:
+            await navigate_to_targeting_step(page)
+        except Exception as exc:
+            log.warning(
+                f"Could not open the Audience Targeting modal at startup: {exc}. "
+                "Will attempt to re-open it before each combination."
+            )
 
         for i, combo in enumerate(combos, 1):
             # --- Check stop signal ---
@@ -134,7 +140,10 @@ async def run(
             if not await _check_session_alive(page, context):
                 log.warning("Session appears expired, re-authenticating …")
                 page = await ensure_authenticated(context)
-                await navigate_to_targeting_step(page)
+                try:
+                    await navigate_to_targeting_step(page)
+                except Exception as exc:
+                    log.warning(f"Could not re-open targeting modal after re-auth: {exc}")
 
             label = (
                 f"[{i}/{remaining}] "

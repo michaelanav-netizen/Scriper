@@ -349,70 +349,101 @@ async def _reset_all(page: Page) -> None:
 # Per-control setters (tag-based multi-select UI)
 # ---------------------------------------------------------------------------
 
-async def set_country(page: Page, country: str) -> None:
-    """Set the Location(s) field."""
-    await _remove_all_tags(page, "Location")
-    if country == "ALL":
-        await _ensure_all_default(page, "Location")
-    else:
+async def set_country(page: Page, country: str) -> bool:
+    """
+    Set the Location(s) field.
+    Returns True if the value was successfully selected, False otherwise.
+    A False return (country not in Roblox's UI) causes the caller to skip
+    this combination rather than record a wrong estimate.
+    """
+    try:
+        await _remove_all_tags(page, "Location")
+        if country == "ALL":
+            await _ensure_all_default(page, "Location")
+            return True
         opened = await _open_field(page, "Location")
         if not opened:
-            log.warning(f"Could not open Location dropdown for '{country}'.")
-            return
+            log.warning(f"Could not open Location dropdown for '{country}' — skipping.")
+            return False
         selected = await _select_option(page, country)
         if not selected:
-            log.warning(f"Could not select location '{country}'.")
-    await _delay(short=True)
+            log.warning(f"'{country}' not found in Roblox's Location list — skipping.")
+            return False
+        await _delay(short=True)
+        return True
+    except Exception as exc:
+        log.warning(f"set_country('{country}') error: {exc} — skipping.")
+        return False
 
 
-async def set_gender(page: Page, gender: str) -> None:
-    """Set the Gender(s) field."""
-    await _remove_all_tags(page, "Gender")
-    if gender == "ALL":
-        await _ensure_all_default(page, "Gender")
-    else:
+async def set_gender(page: Page, gender: str) -> bool:
+    """Set the Gender(s) field. Returns True on success."""
+    try:
+        await _remove_all_tags(page, "Gender")
+        if gender == "ALL":
+            await _ensure_all_default(page, "Gender")
+            return True
         opened = await _open_field(page, "Gender")
         if not opened:
             log.warning(f"Could not open Gender dropdown for '{gender}'.")
-            return
+            return False
         selected = await _select_option(page, gender)
         if not selected:
-            log.warning(f"Could not select gender '{gender}'.")
-    await _delay(short=True)
+            log.warning(f"'{gender}' not found in Roblox's Gender list.")
+            return False
+        await _delay(short=True)
+        return True
+    except Exception as exc:
+        log.warning(f"set_gender('{gender}') error: {exc}")
+        return False
 
 
-async def set_age(page: Page, age_tuple: tuple) -> None:
-    """Set the Ages field. age_tuple examples: ("ALL",), ("18-24",), ("13-17","25+")"""
-    await _remove_all_tags(page, "Ages")
-    if age_tuple == ("ALL",):
-        await _ensure_all_default(page, "Ages")
-    else:
+async def set_age(page: Page, age_tuple: tuple) -> bool:
+    """Set the Ages field. Returns True on success."""
+    try:
+        await _remove_all_tags(page, "Ages")
+        if age_tuple == ("ALL",):
+            await _ensure_all_default(page, "Ages")
+            return True
+        all_selected = True
         for age in age_tuple:
             opened = await _open_field(page, "Ages")
             if not opened:
                 log.warning(f"Could not open Ages dropdown for '{age}'.")
+                all_selected = False
                 continue
             selected = await _select_option(page, age)
             if not selected:
-                log.warning(f"Could not select age '{age}'.")
+                log.warning(f"'{age}' not found in Roblox's Ages list.")
+                all_selected = False
             await asyncio.sleep(0.3)
-    await _delay(short=True)
+        await _delay(short=True)
+        return all_selected
+    except Exception as exc:
+        log.warning(f"set_age({age_tuple}) error: {exc}")
+        return False
 
 
-async def set_device(page: Page, device: str) -> None:
-    """Set the Device(s) field."""
-    await _remove_all_tags(page, "Device")
-    if device == "ALL":
-        await _ensure_all_default(page, "Device")
-    else:
+async def set_device(page: Page, device: str) -> bool:
+    """Set the Device(s) field. Returns True on success."""
+    try:
+        await _remove_all_tags(page, "Device")
+        if device == "ALL":
+            await _ensure_all_default(page, "Device")
+            return True
         opened = await _open_field(page, "Device")
         if not opened:
             log.warning(f"Could not open Device dropdown for '{device}'.")
-            return
+            return False
         selected = await _select_option(page, device)
         if not selected:
-            log.warning(f"Could not select device '{device}'.")
-    await _delay(short=True)
+            log.warning(f"'{device}' not found in Roblox's Device list.")
+            return False
+        await _delay(short=True)
+        return True
+    except Exception as exc:
+        log.warning(f"set_device('{device}') error: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +548,16 @@ async def scrape_combination(page: Page, combo: dict) -> str:
         await _reset_all(page)
 
         # Apply targeting settings.
-        await set_country(page, combo["country"])
+        # If the country is not available in the Roblox UI, skip this combination
+        # by returning "N/A" — this does NOT raise an exception, so the combination
+        # is recorded as done and the loop moves on to the next one.
+        country_ok = await set_country(page, combo["country"])
+        if not country_ok and combo["country"] != "ALL":
+            log.info(
+                f"Skipping combination — '{combo['country']}' not available in Roblox UI."
+            )
+            return "N/A"
+
         await set_gender(page, combo["gender"])
         await set_age(page, combo["age_tuple"])
         await set_device(page, combo["device"])
